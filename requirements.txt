@@ -1,0 +1,4 @@
+gradio 
+anthropic 
+fpdf 
+python-dotenv

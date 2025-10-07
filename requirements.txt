@@ -2,3 +2,6 @@ gradio
 anthropic 
 fpdf 
 python-dotenv
+openai 
+beautifulsoup4 
+requests

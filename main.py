@@ -1,13 +1,14 @@
-import gradio as gr
 import json
 import os
+import re
 from datetime import datetime
-from fpdf import FPDF
+
 import anthropic
+import gradio as gr
 import openai
 import requests
 from bs4 import BeautifulSoup
-import re
+from fpdf import FPDF
 
 # Configuration file
 CONFIG_FILE = "config.json"
@@ -126,14 +127,21 @@ def save_memory(history):
 def scrape_linkedin(url):
     """Scrape basic information from LinkedIn profile (public data only)"""
     try:
+        # Enhanced headers to mimic real browser
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Extract basic visible information
-        # Note: LinkedIn has limited public data available without authentication
         info = {
             'name': '',
             'headline': '',
@@ -143,30 +151,85 @@ def scrape_linkedin(url):
             'skills': ''
         }
         
-        # Try to extract title/meta information
+        # Extract from page title
         title = soup.find('title')
-        if title:
-            info['name'] = title.text.split('|')[0].strip()
+        if title and title.text:
+            parts = title.text.split('-')[0].strip()
+            info['name'] = parts.split('|')[0].strip()
         
-        # Extract meta description
+        # Extract meta tags
         meta_desc = soup.find('meta', {'name': 'description'})
-        if meta_desc:
-            info['headline'] = str(meta_desc.get('content') or '')
+        if meta_desc and meta_desc.get('content'):
+            content = meta_desc.get('content', '')
+            info['headline'] = str(content) if content is not None else ""
+            
+        # Try to extract from Open Graph tags
+        og_title = soup.find('meta', property='og:title')
+        if og_title:
+            og_content = og_title.get('content', '')
+            # Handle if og_content is a list (AttributeValueList) or None
+            if isinstance(og_content, list):
+                og_content = og_content[0] if og_content else ''
+            if og_content:
+                info['name'] = str(og_content).split('-')[0].strip()
         
-        return info, "Successfully scraped LinkedIn profile (limited public data)"
+        og_desc = soup.find('meta', property='og:description')
+        if og_desc:
+            og_desc_content = og_desc.get('content', '')
+            if isinstance(og_desc_content, list):
+                og_desc_content = og_desc_content[0] if og_desc_content else ''
+            info['headline'] = str(og_desc_content) if og_desc_content is not None else ''
+        
+        # Extract any visible text content
+        body_text = soup.get_text(separator=' ', strip=True)
+        
+        # Try to extract education and experience keywords
+        if 'university' in body_text.lower() or 'college' in body_text.lower():
+            # Extract education context
+            lines = body_text.split('.')
+            for line in lines:
+                if any(word in line.lower() for word in ['university', 'college', 'bachelor', 'master', 'phd']):
+                    info['education'] += line.strip() + '\n'
+        
+        # Look for JSON-LD structured data
+        json_ld_scripts = soup.find_all('script', type='application/ld+json')
+        for script in json_ld_scripts:
+            try:
+                if script.string is not None:
+                    data = json.loads(script.string)
+                    if isinstance(data, dict):
+                        if data.get('@type') == 'Person':
+                            info['name'] = data.get('name', info['name'])
+                            info['headline'] = data.get('jobTitle', info['headline'])
+            except:
+                pass
+        
+        if not info['name'] and not info['headline']:
+            return None, "⚠️ LinkedIn scraping blocked or profile not public. LinkedIn limits automated access. Try using 'Generic Profile' mode or manually paste the profile text."
+        
+        return info, "✅ Successfully scraped LinkedIn profile (limited public data available)"
     
+    except requests.exceptions.RequestException as e:
+        return None, f"❌ Error: Could not access LinkedIn. LinkedIn blocks automated scraping. Try: 1) Copy/paste profile text manually, or 2) Use a public portfolio/resume URL instead. Details: {str(e)}"
     except Exception as e:
-        return None, f"Error scraping LinkedIn: {str(e)}"
+        return None, f"❌ Error scraping LinkedIn: {str(e)}"
 
 
 def scrape_generic_profile(url):
     """Scrape information from generic profile pages or portfolio sites"""
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9'
         }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.decompose()
         
         # Extract text content
         text_content = soup.get_text(separator='\n', strip=True)
@@ -179,16 +242,35 @@ def scrape_generic_profile(url):
         phone_pattern = r'[\+\(]?[1-9][0-9 .\-\(\)]{8,}[0-9]'
         phones = re.findall(phone_pattern, text_content)
         
+        # Try to extract name from title or h1
+        name = ''
+        title_tag = soup.find('title')
+        if title_tag:
+            name = title_tag.text.split('|')[0].split('-')[0].strip()
+        
+        h1 = soup.find('h1')
+        if h1 and len(h1.text.strip()) < 50:
+            name = h1.text.strip()
+        
+        # Extract meta description as summary
+        summary = ''
+        meta_desc = soup.find('meta', {'name': 'description'})
+        if meta_desc:
+            summary = meta_desc.get('content', '')
+        
         info = {
+            'name': name,
             'email': emails[0] if emails else '',
             'phone': phones[0] if phones else '',
-            'content': text_content[:2000]  # First 2000 chars
+            'headline': summary[:200] if summary else '',
+            'summary': text_content[:500],
+            'content': text_content[:2000]
         }
         
-        return info, "Successfully scraped profile information"
+        return info, "✅ Successfully scraped profile information"
     
     except Exception as e:
-        return None, f"Error scraping profile: {str(e)}"
+        return None, f"❌ Error scraping profile: {str(e)}"
 
 
 def call_claude(system_prompt, user_prompt, config):
@@ -253,6 +335,29 @@ def call_ollama(system_prompt, user_prompt, config):
         return response.json()['response']
     except Exception as e:
         return f"Error calling Ollama: {str(e)}"
+
+
+def get_ollama_models(ollama_url):
+    """Fetch available Ollama models"""
+    try:
+        url = f"{ollama_url}/api/tags"
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        models = response.json().get('models', [])
+        model_names = [model['name'] for model in models]
+        if not model_names:
+            return ["No models found"], "⚠️ No Ollama models installed. Run 'ollama pull <model>' to install."
+        return model_names, f"✅ Found {len(model_names)} Ollama models"
+    except requests.exceptions.ConnectionError:
+        return ["Connection Error"], "❌ Cannot connect to Ollama. Make sure Ollama is running (ollama serve)"
+    except Exception as e:
+        return ["Error"], f"❌ Error fetching models: {str(e)}"
+
+
+def update_ollama_model_list(ollama_url):
+    """Update Ollama model dropdown"""
+    models, status = get_ollama_models(ollama_url)
+    return gr.Dropdown(choices=models, value=models[0] if models else None), status
 
 
 def generate_with_llm(system_prompt, user_prompt, model_choice, config):
@@ -451,7 +556,7 @@ def load_current_config():
 
 def scrape_profile(url, scrape_type):
     """Scrape profile information"""
-    if scrape_type == "LinkedIn":
+    if scrape_type == "LinkedIn (Limited)":
         info, message = scrape_linkedin(url)
     else:
         info, message = scrape_generic_profile(url)
@@ -472,6 +577,143 @@ def scrape_profile(url, scrape_type):
         return ('', '', '', '', '', '', '', '', message)
 
 
+def toggle_ollama_options(model_choice):
+    """Show/hide Ollama model selector based on provider choice"""
+    if model_choice == "Ollama (Local)":
+        # Load current config to get Ollama URL
+        config = load_config()
+        models, status = get_ollama_models(config['ollama_url'])
+        return (
+            gr.update(visible=True),  # Show row
+            gr.update(choices=models, value=models[0] if models and models[0] != "Connection Error" else None),  # Update dropdown
+            gr.update(visible=True, value=status)  # Show status
+        )
+    else:
+        return (
+            gr.update(visible=False),  # Hide row
+            gr.update(),  # Keep dropdown as is
+            gr.update(visible=False)  # Hide status
+        )
+
+
+def refresh_ollama_models():
+    """Refresh the list of available Ollama models"""
+    config = load_config()
+    models, status = get_ollama_models(config['ollama_url'])
+    return gr.update(choices=models, value=models[0] if models and models[0] != "Connection Error" else None), status
+
+
+def generate_cv_with_ollama(name, email, phone, job_role, summary, education, experience, 
+                             skills, certifications, job_description, model_choice, ollama_model):
+    """Generate CV with Ollama model selection"""
+    config = load_config()
+    
+    # Override config with selected Ollama model if applicable
+    if model_choice == "Ollama (Local)" and ollama_model:
+        config['ollama_model'] = ollama_model
+    
+    user_prompt = f"""
+Please create a professional CV with the following information:
+
+**Personal Information:**
+- Name: {name}
+- Email: {email}
+- Phone: {phone}
+
+**Target Role:** {job_role}
+
+**Professional Summary:** {summary}
+
+**Education:**
+{education}
+
+**Work Experience:**
+{experience}
+
+**Skills:**
+{skills}
+
+**Certifications/Awards:**
+{certifications}
+"""
+    
+    if job_description:
+        user_prompt += f"\n**Job Description to tailor towards:**\n{job_description}"
+    
+    cv_content = generate_with_llm(CV_SYSTEM_PROMPT, user_prompt, model_choice, config)
+    
+    # Save to memory
+    history = load_memory()
+    history.append({
+        "timestamp": datetime.now().isoformat(),
+        "type": "CV",
+        "model": model_choice,
+        "specific_model": ollama_model if model_choice == "Ollama (Local)" else config.get(f"{model_choice.lower().split()[0]}_model"),
+        "inputs": {
+            "name": name,
+            "email": email,
+            "phone": phone,
+            "job_role": job_role
+        },
+        "output": cv_content
+    })
+    save_memory(history)
+    
+    return cv_content
+
+
+def generate_cover_letter_with_ollama(name, email, phone, company, position, 
+                                       key_achievements, motivation, job_description, 
+                                       model_choice, ollama_model):
+    """Generate Cover Letter with Ollama model selection"""
+    config = load_config()
+    
+    # Override config with selected Ollama model if applicable
+    if model_choice == "Ollama (Local)" and ollama_model:
+        config['ollama_model'] = ollama_model
+    
+    user_prompt = f"""
+Please create a professional cover letter with the following information:
+
+**Applicant Information:**
+- Name: {name}
+- Email: {email}
+- Phone: {phone}
+
+**Target Position:** {position} at {company}
+
+**Key Achievements to Highlight:**
+{key_achievements}
+
+**Motivation/Why this role:**
+{motivation}
+"""
+    
+    if job_description:
+        user_prompt += f"\n**Job Description:**\n{job_description}"
+    
+    cover_letter_content = generate_with_llm(COVER_LETTER_SYSTEM_PROMPT, user_prompt, 
+                                             model_choice, config)
+    
+    # Save to memory
+    history = load_memory()
+    history.append({
+        "timestamp": datetime.now().isoformat(),
+        "type": "Cover Letter",
+        "model": model_choice,
+        "specific_model": ollama_model if model_choice == "Ollama (Local)" else config.get(f"{model_choice.lower().split()[0]}_model"),
+        "inputs": {
+            "name": name,
+            "company": company,
+            "position": position
+        },
+        "output": cover_letter_content
+    })
+    save_memory(history)
+    
+    return cover_letter_content
+
+
 # Create Gradio Interface
 with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
     gr.Markdown("# 📄 Professional CV & Cover Letter Generator")
@@ -485,14 +727,41 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
             model_choice = gr.Dropdown(
                 choices=["Claude (Anthropic)", "GPT (OpenAI)", "Ollama (Local)"],
                 value="Claude (Anthropic)",
-                label="Select LLM Model"
+                label="Select LLM Provider"
             )
+    
+    # Ollama model selector (conditional)
+    with gr.Row(visible=False) as ollama_model_row:
+        with gr.Column(scale=3):
+            ollama_model_dropdown = gr.Dropdown(
+                choices=["llama2"],
+                value="llama2",
+                label="Select Ollama Model",
+                interactive=True
+            )
+        with gr.Column(scale=1):
+            refresh_ollama_btn = gr.Button("🔄 Refresh Models", size="sm")
+    
+    ollama_status = gr.Textbox(label="Ollama Status", visible=False, interactive=False)
     
     # Web scraping section
     with gr.Accordion("🌐 Auto-fill from Web Profile", open=False):
+        gr.Markdown("""
+        **Note about LinkedIn**: LinkedIn actively blocks automated scraping. For best results:
+        - Use 'Generic Profile' for personal websites, portfolios, or resume pages
+        - For LinkedIn, manually copy and paste the profile information
+        - Try using Google Docs, Notion, or personal website URLs instead
+        """)
         with gr.Row():
-            scrape_url = gr.Textbox(label="Profile URL", placeholder="https://linkedin.com/in/username or portfolio URL")
-            scrape_type = gr.Radio(["LinkedIn", "Generic Profile"], value="LinkedIn", label="Profile Type")
+            scrape_url = gr.Textbox(
+                label="Profile URL", 
+                placeholder="https://yourportfolio.com or https://linkedin.com/in/username"
+            )
+            scrape_type = gr.Radio(
+                ["Generic Profile", "LinkedIn (Limited)"], 
+                value="Generic Profile", 
+                label="Profile Type"
+            )
         scrape_btn = gr.Button("Scrape Profile", variant="secondary")
         scrape_status = gr.Textbox(label="Scrape Status", interactive=False)
     
@@ -535,6 +804,19 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
         outputs=[name, email, phone, job_role, summary, education, experience, skills, scrape_status]
     )
     
+    # Model choice change handler
+    model_choice.change(
+        fn=toggle_ollama_options,
+        inputs=[model_choice],
+        outputs=[ollama_model_row, ollama_model_dropdown, ollama_status]
+    )
+    
+    # Refresh Ollama models button
+    refresh_ollama_btn.click(
+        fn=refresh_ollama_models,
+        outputs=[ollama_model_dropdown, ollama_status]
+    )
+    
     with gr.Tabs():
         # CV Generator Tab
         with gr.Tab("📋 CV Generator"):
@@ -552,9 +834,9 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
                 cv_download = gr.File(label="Download CV")
             
             cv_generate_btn.click(
-                fn=generate_cv,
+                fn=generate_cv_with_ollama,
                 inputs=[name, email, phone, job_role, summary, education, experience, 
-                       skills, certifications, cv_job_desc, model_choice],
+                       skills, certifications, cv_job_desc, model_choice, ollama_model_dropdown],
                 outputs=cv_output
             )
             
@@ -595,9 +877,9 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
                 cl_download = gr.File(label="Download Cover Letter")
             
             cl_generate_btn.click(
-                fn=generate_cover_letter,
+                fn=generate_cover_letter_with_ollama,
                 inputs=[name, email, phone, company, position, key_achievements, 
-                       motivation, cl_job_desc, model_choice],
+                       motivation, cl_job_desc, model_choice, ollama_model_dropdown],
                 outputs=cl_output
             )
             
@@ -626,8 +908,11 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
                 cfg_openai_model = gr.Textbox(label="OpenAI Model", placeholder="gpt-4-turbo-preview")
             
             with gr.Row():
-                cfg_ollama_model = gr.Textbox(label="Ollama Model", placeholder="llama2")
+                cfg_ollama_model = gr.Textbox(label="Ollama Default Model", placeholder="llama2")
                 cfg_ollama_url = gr.Textbox(label="Ollama URL", placeholder="http://localhost:11434")
+            
+            ollama_test_btn = gr.Button("Test Ollama Connection", variant="secondary")
+            ollama_test_status = gr.Textbox(label="Ollama Test Status", interactive=False)
             
             gr.Markdown("### API Keys")
             cfg_anthropic_key = gr.Textbox(label="Anthropic API Key", type="password")
@@ -652,6 +937,12 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
                        cfg_ollama_model, cfg_ollama_url, cfg_anthropic_key,
                        cfg_openai_key, cfg_max_tokens, cfg_temperature],
                 outputs=cfg_status
+            )
+            
+            ollama_test_btn.click(
+                fn=lambda url: get_ollama_models(url)[1],
+                inputs=[cfg_ollama_url],
+                outputs=ollama_test_status
             )
         
         # History Tab

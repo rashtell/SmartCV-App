@@ -27,6 +27,29 @@ DEFAULT_CONFIG = {
     "temperature": 0.7
 }
 
+# Available models for each provider
+CLAUDE_MODELS = [
+    "claude-sonnet-4-20250514",
+    "claude-opus-4-20250514", 
+    "claude-sonnet-3-5-20241022",
+    "claude-sonnet-3-5-20240620",
+    "claude-3-5-sonnet-20240620",
+    "claude-3-opus-20240229",
+    "claude-3-sonnet-20240229",
+    "claude-3-haiku-20240307",
+]
+
+OPENAI_MODELS = [
+    "gpt-4-turbo-preview",
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-4-32k",
+    "gpt-3.5-turbo",
+    "gpt-3.5-turbo-16k",
+    "o1-preview",
+    "o1-mini",
+]
+
 # System prompts
 CV_SYSTEM_PROMPT = """
 Create a professional CV based on the following.
@@ -352,6 +375,81 @@ def get_ollama_models(ollama_url):
         return ["Connection Error"], "❌ Cannot connect to Ollama. Make sure Ollama is running (ollama serve)"
     except Exception as e:
         return ["Error"], f"❌ Error fetching models: {str(e)}"
+    
+def extract_job_info_from_description(job_description):
+    """Extract job role, company, position, and skills from job description using simple parsing"""
+    if not job_description or len(job_description.strip()) < 50:
+        return None, None, None, None
+    
+    job_role = ""
+    company = ""
+    position = ""
+    skills = ""
+    
+    lines = job_description.split('\n')
+    text_lower = job_description.lower()
+    
+    # Try to find company name (common patterns)
+    for line in lines[:10]:  # Check first 10 lines
+        if 'company:' in line.lower():
+            company = line.split(':', 1)[1].strip()
+            break
+        elif 'at ' in line.lower() and len(line.split()) < 10:
+            parts = line.lower().split('at ')
+            if len(parts) > 1:
+                company = parts[1].strip().title()
+                break
+    
+    # Try to find position/role (usually in first few lines or after "position:", "role:", "title:")
+    for line in lines[:5]:
+        line_lower = line.lower()
+        if any(keyword in line_lower for keyword in ['position:', 'role:', 'title:', 'job title:']):
+            position = line.split(':', 1)[1].strip() if ':' in line else line.strip()
+            job_role = position
+            break
+        elif len(line.split()) <= 6 and len(line) > 10 and not line.startswith(('http', 'www')):
+            # Likely a title if it's short and near the top
+            position = line.strip()
+            job_role = position
+            break
+    
+    # Extract skills (look for common skill section keywords)
+    skill_keywords = ['required skills:', 'skills:', 'requirements:', 'qualifications:', 'technical skills:', 'must have:']
+    for keyword in skill_keywords:
+        if keyword in text_lower:
+            idx = text_lower.index(keyword)
+            # Get next 500 characters after the keyword
+            skills_section = job_description[idx:idx+500]
+            # Extract bullet points or comma-separated items
+            skills_lines = [line.strip() for line in skills_section.split('\n')[1:8] if line.strip()]
+            skills = '\n'.join(skills_lines)
+            break
+    
+    return job_role, company, position, skills
+
+
+def auto_fill_from_job_description(job_desc, current_job_role, current_company, current_position, current_skills):
+    """Auto-fill fields from job description if they're empty"""
+    if not job_desc:
+        return current_job_role, current_company, current_position, current_skills
+    
+    extracted_role, extracted_company, extracted_position, extracted_skills = extract_job_info_from_description(job_desc)
+    
+    # Only fill if current field is empty
+    new_job_role = current_job_role if current_job_role else (extracted_role or current_job_role)
+    new_company = current_company if current_company else (extracted_company or current_company)
+    new_position = current_position if current_position else (extracted_position or current_position)
+    
+    # For skills, append if extracted skills found
+    if extracted_skills and not current_skills:
+        new_skills = extracted_skills
+    elif extracted_skills and current_skills:
+        new_skills = current_skills + "\n\n--- Extracted from Job Description ---\n" + extracted_skills
+    else:
+        new_skills = current_skills
+    
+    return new_job_role, new_company, new_position, new_skills
+    
 
 
 def update_ollama_model_list(ollama_url):
@@ -541,6 +639,12 @@ def save_configuration(default_model, claude_model, openai_model, ollama_model,
 def load_current_config():
     """Load current configuration for display"""
     config = load_config()
+    
+    # Get ollama models for dropdown
+    ollama_models, _ = get_ollama_models(config['ollama_url'])
+    if not ollama_models or ollama_models[0] in ["Connection Error", "No models found", "Error"]:
+        ollama_models = ["llama2"]  # Fallback
+    
     return (
         config['default_model'],
         config['claude_model'],
@@ -550,7 +654,8 @@ def load_current_config():
         config['anthropic_api_key'],
         config['openai_api_key'],
         config['max_tokens'],
-        config['temperature']
+        config['temperature'],
+        gr.update(choices=ollama_models, value=config['ollama_model'])
     )
 
 
@@ -821,10 +926,13 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
         # CV Generator Tab
         with gr.Tab("📋 CV Generator"):
             cv_job_desc = gr.Textbox(
-                label="Job Description (Optional - for tailoring)",
-                placeholder="Paste the job description here...",
-                lines=4
+                label="Job Description (Optional - for tailoring and auto-fill)",
+                placeholder="Paste the full job description here. Fields below will auto-populate if empty...",
+                lines=6
             )
+            
+            cv_auto_fill_btn = gr.Button("🔄 Auto-fill from Job Description", variant="secondary", size="sm")
+            cv_auto_fill_status = gr.Textbox(label="Auto-fill Status", interactive=False, visible=False)
             
             cv_generate_btn = gr.Button("Generate CV", variant="primary")
             cv_output = gr.Textbox(label="Generated CV", lines=20)
@@ -840,6 +948,12 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
                 outputs=cv_output
             )
             
+            cv_auto_fill_btn.click(
+                fn=auto_fill_from_job_description,
+                inputs=[cv_job_desc, job_role, gr.Textbox(value="", visible=False), gr.Textbox(value="", visible=False), skills],
+                outputs=[job_role, gr.Textbox(visible=False), gr.Textbox(visible=False), skills]
+            )
+            
             cv_export_btn.click(
                 fn=lambda content: export_to_pdf(content, "cv_output.pdf", "CV"),
                 inputs=cv_output,
@@ -848,9 +962,17 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
         
         # Cover Letter Generator Tab
         with gr.Tab("✉️ Cover Letter Generator"):
+            cl_job_desc = gr.Textbox(
+                label="Job Description (Optional - for tailoring and auto-fill)",
+                placeholder="Paste the full job description here. Company and position fields will auto-populate if empty...",
+                lines=6
+            )
+            
+            cl_auto_fill_btn = gr.Button("🔄 Auto-fill from Job Description", variant="secondary", size="sm")
+            
             with gr.Row():
-                company = gr.Textbox(label="Company Name", placeholder="Google")
-                position = gr.Textbox(label="Position", placeholder="Senior Software Engineer")
+                company = gr.Textbox(label="Company Name", placeholder="Google (auto-fills from job description)")
+                position = gr.Textbox(label="Position", placeholder="Senior Software Engineer (auto-fills from job description)")
             
             key_achievements = gr.Textbox(
                 label="Key Achievements to Highlight",
@@ -861,12 +983,6 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
                 label="Why This Role/Company?",
                 placeholder="I am excited about this opportunity because...",
                 lines=3
-            )
-            
-            cl_job_desc = gr.Textbox(
-                label="Job Description (Optional)",
-                placeholder="Paste the job description here...",
-                lines=4
             )
             
             cl_generate_btn = gr.Button("Generate Cover Letter", variant="primary")
@@ -881,6 +997,12 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
                 inputs=[name, email, phone, company, position, key_achievements, 
                        motivation, cl_job_desc, model_choice, ollama_model_dropdown],
                 outputs=cl_output
+            )
+            
+            cl_auto_fill_btn.click(
+                fn=auto_fill_from_job_description,
+                inputs=[cl_job_desc, job_role, company, position, skills],
+                outputs=[job_role, company, position, skills]
             )
             
             cl_export_btn.click(
@@ -904,13 +1026,33 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
             gr.Markdown("### Model Configuration")
             
             with gr.Row():
-                cfg_claude_model = gr.Textbox(label="Claude Model", placeholder="claude-sonnet-4-20250514")
-                cfg_openai_model = gr.Textbox(label="OpenAI Model", placeholder="gpt-4-turbo-preview")
+                cfg_claude_model = gr.Dropdown(
+                    choices=CLAUDE_MODELS,
+                    value="claude-sonnet-4-20250514",
+                    label="Claude Model",
+                    allow_custom_value=True
+                )
+                cfg_openai_model = gr.Dropdown(
+                    choices=OPENAI_MODELS,
+                    value="gpt-4-turbo-preview",
+                    label="OpenAI Model",
+                    allow_custom_value=True
+                )
             
-            with gr.Row():
-                cfg_ollama_model = gr.Textbox(label="Ollama Default Model", placeholder="llama2")
-                cfg_ollama_url = gr.Textbox(label="Ollama URL", placeholder="http://localhost:11434")
+            cfg_ollama_models_dropdown = gr.Dropdown(
+                choices=get_ollama_models(DEFAULT_CONFIG['ollama_url'])[0],
+                value=DEFAULT_CONFIG['ollama_model'],
+                label="Ollama Default Model",
+                allow_custom_value=True
+            )
             
+            cfg_ollama_url = gr.Textbox(
+                label="Ollama URL", 
+                value="http://localhost:11434",
+                placeholder="http://localhost:11434"
+            )
+            
+            cfg_refresh_ollama = gr.Button("🔄 Refresh Ollama Models", size="sm")
             ollama_test_btn = gr.Button("Test Ollama Connection", variant="secondary")
             ollama_test_status = gr.Textbox(label="Ollama Test Status", interactive=False)
             
@@ -927,16 +1069,22 @@ with gr.Blocks(title="CV & Cover Letter Generator", theme="soft") as app:
             cfg_load_btn.click(
                 fn=load_current_config,
                 outputs=[cfg_default_model, cfg_claude_model, cfg_openai_model, 
-                        cfg_ollama_model, cfg_ollama_url, cfg_anthropic_key, 
-                        cfg_openai_key, cfg_max_tokens, cfg_temperature]
+                        cfg_ollama_models_dropdown, cfg_ollama_url, cfg_anthropic_key, 
+                        cfg_openai_key, cfg_max_tokens, cfg_temperature, cfg_ollama_models_dropdown]
             )
             
             cfg_save_btn.click(
                 fn=save_configuration,
                 inputs=[cfg_default_model, cfg_claude_model, cfg_openai_model,
-                       cfg_ollama_model, cfg_ollama_url, cfg_anthropic_key,
+                       cfg_ollama_models_dropdown, cfg_ollama_url, cfg_anthropic_key,
                        cfg_openai_key, cfg_max_tokens, cfg_temperature],
                 outputs=cfg_status
+            )
+            
+            cfg_refresh_ollama.click(
+                fn=lambda url: update_ollama_model_list(url)[0],
+                inputs=[cfg_ollama_url],
+                outputs=cfg_ollama_models_dropdown
             )
             
             ollama_test_btn.click(

@@ -1,7 +1,7 @@
-gradio 
-anthropic 
-fpdf 
+anthropic
+beautifulsoup4
+fpdf
+gradio
+openai
 python-dotenv
-openai 
-beautifulsoup4 
 requests

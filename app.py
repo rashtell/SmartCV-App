@@ -25,39 +25,62 @@ def build_ui():
 
         # Model selection section
         with gr.Row():
-            gr.Column(scale=2)
+            with gr.Column(scale=2):
+                # Web scraping section
+                with gr.Accordion("🌐 Auto-fill from Web Profile", open=False):
+                    gr.Markdown(
+                        "LinkedIn often blocks scraping. Use generic portfolio URLs or paste text manually."
+                    )
+
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            scrape_status = gr.Textbox(
+                                show_label=False,
+                                interactive=False,
+                                placeholder="Status",
+                            )
+                        gr.Column(scale=2)
+
+                    with gr.Row():
+                        scrape_url = gr.Textbox(label="Profile URL")
+
+                        scrape_type = gr.Radio(
+                            label="Type",
+                            choices=["Generic Profile", "LinkedIn (Limited)"],
+                            value="Generic Profile",
+                        )
+
+                    with gr.Row():
+                        scrape_btn = gr.Button("Scrape Profile", size="md")
+                        gr.Column(scale=4)
+
             with gr.Column(scale=1):
+
                 model_choice = gr.Dropdown(
                     choices=[CLAUDE_ANTHROPIC, GPT_OPENAI, OLLAMA_LOCAL],
                     value=OLLAMA_LOCAL,
                     label="Select LLM Provider",
                 )
 
-        with gr.Column(
-            visible=(config.get("default_model") == config.get("ollama_model"))
-        ) as ollama_row:
-            with gr.Row():
-                gr.Column(scale=2)
-                with gr.Column(scale=1):
-                    ollama_dropdown = gr.Dropdown(
-                        choices=get_ollama_models(config["ollama_url"])[0],
-                        value=config.get("ollama_model"),
-                        label="Select Ollama Model",
-                        interactive=True,
-                    )
-            with gr.Row():
-                gr.Column(scale=2)
-                with gr.Column(scale=1):
-                    refresh_btn = gr.Button(
-                        "🔄 Refresh Models", size="sm", variant="primary"
-                    )
+                with gr.Row(
+                    visible=(config.get("default_model") == config.get("ollama_model"))
+                ) as ollama_row:
+                    with gr.Column(scale=1):
+                        ollama_dropdown = gr.Dropdown(
+                            choices=get_ollama_models(config["ollama_url"])[0],
+                            value=config.get("ollama_model"),
+                            label="Select Ollama Model",
+                            interactive=True,
+                        )
+                    with gr.Column(scale=1):
+                        refresh_btn = gr.Button(
+                            "🔄 Refresh Models", size="sm", variant="primary"
+                        )
 
-            with gr.Row():
-                gr.Column(scale=2)
-                with gr.Column(scale=1):
-                    ollama_status = gr.Textbox(
-                        show_label=False, placeholder="Ollama Status"
-                    )
+                    with gr.Column(scale=1):
+                        ollama_status = gr.Textbox(
+                            show_label=False, placeholder="Ollama Status"
+                        )
 
         def toggle_ollama_visibility(choice):
             return gr.update(visible=(choice == OLLAMA_LOCAL))
@@ -76,31 +99,6 @@ def build_ui():
             inputs=[],
             outputs=[ollama_dropdown, ollama_status],
         )
-
-        # Web scraping section
-        with gr.Accordion("🌐 Auto-fill from Web Profile", open=False):
-            gr.Markdown(
-                "LinkedIn often blocks scraping. Use generic portfolio URLs or paste text manually."
-            )
-
-            with gr.Row():
-                with gr.Column(scale=1):
-                    scrape_status = gr.Textbox(
-                        show_label=False, interactive=False, placeholder="Status"
-                    )
-                gr.Column(scale=2)
-
-            with gr.Row():
-                scrape_url = gr.Textbox(label="Profile URL")
-                scrape_type = gr.Radio(
-                    show_label=False,
-                    choices=["Generic Profile", "LinkedIn (Limited)"],
-                    value="Generic Profile",
-                )
-
-            with gr.Row():
-                gr.Column(scale=1)
-                scrape_btn = gr.Button("Scrape Profile")
 
         # Personal info fields
         with gr.Row():
@@ -132,6 +130,7 @@ def build_ui():
                 auto_fill_btn = gr.Button(
                     "🔄 Auto-fill from Job Description", size="md", variant="primary"
                 )
+            gr.Column(scale=4)
 
         # Scrape action
         def scrape_profile(url, scrape_type):
@@ -492,7 +491,12 @@ def build_ui():
                     out += f"- **{item.get('type', 'N/A')}** | {item.get('timestamp', '')} | {item.get('model', '')}\\n"
                 return out
 
-            gr.Button("Refresh History").click(fn=view_history, outputs=history_out)
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Button("Refresh History").click(
+                        fn=view_history, outputs=history_out
+                    )
+                gr.Column(scale=4)
 
     return app
 
